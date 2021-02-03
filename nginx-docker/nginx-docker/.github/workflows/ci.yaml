@@ -1,0 +1,186 @@
+################################################################################
+#      Copyright (C) 2020        Sebastian Francisco Colomar Bauza             #
+#      SPDX-License-Identifier:  GPL-2.0-only                                  #
+################################################################################
+name: CI                                                                       #
+on:                                                                            #
+  push:                                                                        #
+    branches:                                                                  #
+    - docker                                                                   #
+jobs:                                                                          #
+  docker:                                                                      #
+    runs-on: ubuntu-18.04                                                      #
+    steps:                                                                     #
+    - name: checkout                                                           #
+      uses: actions/checkout@v2                                                #
+    - name: test                                                               #
+      run: |                                                                   #
+        set -x                                                                 ;
+                                                                               #
+        branch=$(basename $GITHUB_REF)                                         ;
+        project=$(basename $GITHUB_REPOSITORY)                                 ;
+                                                                               #
+        echo $branch | grep ^v[0-9]                                            \
+          && release=$( echo $branch | awk -F^v '{ print $2 }' )               \
+          || release=latest                                                    ;
+                                                                               #
+        docker build -t $GITHUB_REPOSITORY:$release-testing --no-cache .       ;
+                                                                               #
+        sudo cp -rv run/* /run                                                 ;
+                                                                               #
+        docker run -d -p 80:8080                                               \
+          --cpus "0.1" -m 100m --memory-reservation 100m                       \
+          --health-cmd "curl localhost:8080 | grep -q 'Welcome to nginx!'"     \
+          --health-interval=10s                                                \
+          --health-retries=3                                                   \
+          --health-start-period=30s                                            \
+          --health-timeout=1s                                                  \
+          --volume                                                             \
+            /run/configs/etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro         \
+          --volume                                                             \
+            /run/secrets/etc/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro \
+          --name test $GITHUB_REPOSITORY:$release-testing                      ;
+                                                                               #
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            docker exec test ps                                                \
+            |                                                                  \
+            grep "1.*nginx: master process"                                    \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            curl localhost                                                     \
+            |                                                                  \
+            grep "Welcome to nginx!"                                           \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            docker logs test                                                   \
+              2>& 1                                                            \
+            |                                                                  \
+            grep "Configuration complete; ready for start up"                  \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+                                                                               #
+  swarm:                                                                       #
+    env:                                                                       #
+      mode: swarm                                                              #
+    runs-on: ubuntu-18.04                                                      #
+    steps:                                                                     #
+    - name: checkout                                                           #
+      uses: actions/checkout@v2                                                #
+    - name: test                                                               #
+      run: |                                                                   #
+        set -x                                                                 ;
+                                                                               #
+        branch=$(basename $GITHUB_REF)                                         ;
+        project=$(basename $GITHUB_REPOSITORY)                                 ;
+                                                                               #
+        echo $branch | grep ^v[0-9]                                            \
+          && release=$( echo $branch | awk -F^v '{ print $2 }' )               \
+          || release=latest                                                    ;
+                                                                               #
+        docker build -t $GITHUB_REPOSITORY:$release-testing --no-cache .       ;
+                                                                               #
+        compose=etc/$mode/manifests/$project.yaml                              ;
+                                                                               #
+        sed -i /image:.*$project/s/$release/$release-testing/ $compose         ;
+                                                                               #
+        docker swarm init                                                      ;
+        sed -i /node.role/s/worker/manager/ $compose                           ;
+                                                                               #
+        sudo cp -rv run/* /run                                                 ;
+                                                                               #
+        docker stack deploy -c $compose $project                               ;
+                                                                               #
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            docker service ls                                                  \
+            |                                                                  \
+            grep "$project.*replicated.*\([0-9]\)/\1.*8080"                    \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            docker service logs ${project}_${project}                          \
+              2>& 1                                                            \
+            |                                                                  \
+            grep "Configuration complete; ready for start up"                  \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+                                                                               #
+  kubernetes:                                                                  #
+    env:                                                                       #
+      mode: kubernetes                                                         #
+    runs-on: ubuntu-18.04                                                      #
+    steps:                                                                     #
+    - name: checkout                                                           #
+      uses: actions/checkout@v2                                                #
+    - name: test                                                               #
+      run: |                                                                   #
+        set -x                                                                 ;
+                                                                               #
+        branch=$(basename $GITHUB_REF)                                         ;
+        project=$(basename $GITHUB_REPOSITORY)                                 ;
+                                                                               #
+        echo $branch | grep ^v[0-9]                                            \
+          && release=$( echo $branch | awk -F^v '{ print $2 }' )               \
+          || release=latest                                                    ;
+                                                                               #
+        docker build -t $GITHUB_REPOSITORY:$release-testing --no-cache .       ;
+                                                                               #
+        sudo cp -rv run/* /run                                                 ;
+                                                                               #
+        compose=etc/$mode/manifests/$project.yaml                              ;
+                                                                               #
+        sed -i /image:.*$project/s/$release/$release-testing/ $compose         ;
+                                                                               #
+        uuid=$( md5sum $compose | cut -d\  -f1 )                               ;
+        git clone --single-branch -b v1.2                                      \
+          https://github.com/academiaonline/kubernetes $uuid                   ;
+        path=$uuid/bin/cluster/ubuntu18/install-docker-kubelet.sh              ;
+        source $path                                                           ;
+        path=$uuid/bin/cluster/ubuntu18/install-leader.sh                      ;
+        source $path                                                           ;
+        master=$( kubectl get node | grep master | awk '{ print $1 }' )        ;
+        kubectl taint node $master node-role.kubernetes.io/master:NoSchedule-  ;
+        path=$uuid/bin/configs-secrets-gen.sh                                  ;
+        source $path                                                           ;
+        rm -rf $uuid                                                           ;
+                                                                               #
+        sed -i /imagePullPolicy/s/Always/Never/ $compose                       ;
+                                                                               #
+        kubectl apply -f $compose                                              ;
+                                                                               #
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            kubectl get deploy | grep "$project.*\([0-9]\)/\1" && break        ;
+          done                                                                 ;
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            kubectl get svc | grep "$project.*ClusterIP.*8080/TCP" && break    ;
+          done                                                                 ;
+        while true                                                             ;
+          do                                                                   \
+            sleep 10                                                           ;
+            kubectl logs deploy/$project                                       \
+            |                                                                  \
+            grep "Configuration complete; ready for start up"                  \
+            &&                                                                 \
+            break                                                              ;
+          done                                                                 ;
+################################################################################
